@@ -1,9 +1,10 @@
-// microgpt.ts: a complete GPT in one file with zero dependencies.
-// Tokenizer, autograd, transformer, Adam, training loop, sampling.
-// Run: node microgpt.ts   (Node >= 22.18)   or   npx tsx microgpt.ts
+// tiny-llm.ts: a complete GPT in one file with zero dependencies.
+// Tokenizer, autograd, transformer, Adam, training step, sampling.
+// This file only defines the model; ui.ts drives it from index.html.
+// Run the UI: npm install && npm run dev
 
 // ---- data: any list of short strings works; swap in your own ----
-const docs =
+export const docs =
   `emma olivia ava isabella sophia charlotte mia amelia harper evelyn abigail emily
 elizabeth mila ella avery sofia camila aria scarlett victoria madison luna grace chloe penelope
 layla riley zoey nora lily eleanor hannah lillian addison aubrey ellie stella natalie zoe leah
@@ -26,9 +27,9 @@ juan maddox justin waylon calvin giovanni jonah abel jayce jesus amir king beau 
   );
 
 // ---- tokenizer: one token per character, plus BOS (also used as end-of-text) ----
-const chars = [...new Set(docs.join(""))].sort();
-const BOS = chars.length;
-const vocab = chars.length + 1;
+export const chars = [...new Set(docs.join(""))].sort();
+export const BOS = chars.length;
+export const vocab = chars.length + 1;
 const encode = (s: string) => [
   BOS,
   ...[...s].map((ch) => chars.indexOf(ch)),
@@ -102,16 +103,18 @@ const nEmbd = 16,
   nHead = 4,
   nLayer = 1,
   blockSize = 16;
+export { blockSize };
 const headDim = nEmbd / nHead;
 
-const params: V[] = [];
+export const params: V[] = [];
 const gauss = () =>
   Math.sqrt(-2 * Math.log(1 - Math.random())) *
   Math.cos(2 * Math.PI * Math.random());
+const initWeight = () => gauss() * 0.08;
 const matrix = (rows: number, cols: number) =>
   Array.from({ length: rows }, () =>
     Array.from({ length: cols }, () => {
-      const p = new V(gauss() * 0.08);
+      const p = new V(initWeight());
       params.push(p);
       return p;
     })
@@ -186,15 +189,18 @@ function gpt(tok: number, pos: number, keys: KVCache, vals: KVCache): V[] {
 }
 
 // ---- train: Adam, one document per step, linear LR decay ----
-const steps = 1000,
-  lr = 0.01,
+export const steps = 1000;
+const lr = 0.01,
   b1 = 0.85,
   b2 = 0.99;
-const m = new Float64Array(params.length);
-const v = new Float64Array(params.length);
-console.log(`${params.length} params, vocab ${vocab}, ${docs.length} docs`);
+const m = new Float64Array(params.length); // Adam 1st moment (running mean of grads)
+const v = new Float64Array(params.length); // Adam 2nd moment (running mean of grad²)
+let step = 0;
+export const currentStep = () => step;
 
-for (let step = 0; step < steps; step++) {
+// One optimisation step on one random name. Returns that name's mean loss.
+export function trainStep(): number {
+  if (step >= steps) throw new Error("training finished; call reset()");
   const toks = encode(docs[Math.floor(Math.random() * docs.length)]);
   const n = Math.min(blockSize, toks.length - 1);
   const keys = newKVCache(),
@@ -214,26 +220,55 @@ for (let step = 0; step < steps; step++) {
     p.data -= (lrT * mHat) / (Math.sqrt(vHat) + 1e-8);
     p.grad = 0;
   });
-  if (step % 100 === 0 || step === steps - 1)
-    console.log(`step ${step}  loss ${loss.data.toFixed(3)}`);
+  step++;
+  return loss.data;
 }
 
-// ---- sample ----
-const temperature = 0.6;
-console.log("\nsamples:");
-for (let i = 0; i < 20; i++) {
+// Back to a freshly initialised, untrained model.
+export function reset() {
+  params.forEach((p) => {
+    p.data = initWeight();
+    p.grad = 0;
+  });
+  m.fill(0);
+  v.fill(0);
+  step = 0;
+}
+
+// ---- inference ----
+// Keep only characters the model knows, and leave room for one more position.
+export const cleanPrefix = (s: string) =>
+  [...s.toLowerCase()].filter((ch) => chars.includes(ch)).join("").slice(0, blockSize - 1);
+
+// Feed BOS + prefix through the model; return the cache and the last logits.
+function prime(prefix: string) {
   const keys = newKVCache(),
     vals = newKVCache();
-  let tok = BOS,
-    out = "";
-  for (let t = 0; t < blockSize; t++) {
-    const probs = softmax(
-      gpt(tok, t, keys, vals).map((z) => z.scale(1 / temperature))
-    );
+  const toks = [BOS, ...[...prefix].map((ch) => chars.indexOf(ch))];
+  let logits: V[] = [];
+  toks.forEach((tok, pos) => (logits = gpt(tok, pos, keys, vals)));
+  return { keys, vals, logits, pos: toks.length };
+}
+
+// Probability of every token coming next after `prefix` (index BOS = "end").
+export function nextTokenProbs(prefix: string, temperature = 1): number[] {
+  const { logits } = prime(cleanPrefix(prefix));
+  return softmax(logits.map((z) => z.scale(1 / temperature))).map((p) => p.data);
+}
+
+// Generate one name, optionally starting from `prefix`.
+export function sample(temperature = 0.6, prefix = ""): string {
+  let out = cleanPrefix(prefix);
+  let { keys, vals, logits, pos } = prime(out);
+  for (; ; pos++) {
+    const probs = softmax(logits.map((z) => z.scale(1 / temperature)));
     let r = Math.random();
-    tok = probs.findIndex((p) => (r -= p.data) < 0);
-    if (tok === BOS || tok < 0) break;
+    let tok = probs.findIndex((p) => (r -= p.data) < 0);
+    if (tok < 0) tok = probs.length - 1; // float rounding: r never hit 0
+    if (tok === BOS) break;
     out += chars[tok];
+    if (pos === blockSize) break; // no position embedding left
+    logits = gpt(tok, pos, keys, vals);
   }
-  console.log(out);
+  return out;
 }
