@@ -4,6 +4,8 @@ This guide teaches the core ideas behind large language models (LLMs) such as GP
 
 The model has 4,192 parameters. GPT-3 has 175 billion. The ideas are the same; only the scale differs.
 
+This is the short tour. For the full version, with measurements from inside the trained model, see [DEEP-DIVE.md](DEEP-DIVE.md). For derivatives and backpropagation in depth, see [GRADIENTS.md](GRADIENTS.md).
+
 ---
 
 ## 0. The one idea everything rests on
@@ -77,6 +79,14 @@ This is **next-token prediction**, the whole training objective of a GPT.
 ## 3. Autograd: how the model learns which way to move ([tiny-llm.ts:40](tiny-llm.ts#L40))
 
 Training means: "change each parameter a little in the direction that lowers the loss." To do that we need the **gradient**: for every parameter, how much the loss would change if that parameter increased slightly. Computing it by hand for thousands of parameters is impossible, so we automate it. This is **automatic differentiation**, or **autograd**.
+
+### Why derivatives?
+
+A derivative answers one question per parameter: *if I nudge this number up a little, does the loss go up or down, and by how much?* If `d(loss)/dw = +0.5`, raising `w` raises the loss, so we lower it. The update `w = w − lr × grad` always moves downhill.
+
+You could measure this by bumping each weight and rerunning the model, but that costs one forward pass **per parameter** (4,192 here, billions in a real LLM). Autograd uses the chain rule to get **every** gradient from **one** backward pass, at roughly the cost of one forward pass. That is what makes training possible at all.
+
+For the full story (derivatives from scratch, the chain rule, every operation's derivative, and a gradient traced through this model) see [GRADIENTS.md](GRADIENTS.md).
 
 ### The `V` class
 
